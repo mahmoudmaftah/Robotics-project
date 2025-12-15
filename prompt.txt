@@ -1,0 +1,123 @@
+Goal. Build a fully reproducible Python project that designs, implements, simulates, and compares control strategies for three discrete-time robot models (integrator, unicycle, 2-link manipulator). The project must include linear and nonlinear controllers, Lyapunov stability analysis (and other stability certificates), symbolic control specifications (reachability, avoidance, recurrence — can be LTL/automata), interactive trajectory & region drawing, automated tests that run locally, and a comparison report summarizing strengths & limitations of each approach. All code must run without modification on a typical Python 3.10+ environment after pip install -r requirements.txt. Produce code, plots, unit tests, and a final report (markdown + figures).
+
+Requirements & constraints
+
+Use the discrete-time robot models exactly as specified in Symbolic_control_lecture-7.pdf. Cite it for model definitions. 
+
+Symbolic_control_lecture-7
+
+Provide at least three distinct controller families per robot spanning linear & nonlinear paradigms. Examples (not exhaustive):
+
+Linear: PID, LQR (on linearized model), state-feedback with pole placement.
+
+Nonlinear: feedback linearization / exact linearization, backstepping, sliding-mode control (SMC), energy-shaping/computed-torque (manipulator).
+
+Optimal / constrained: finite-horizon MPC (discrete), model predictive control via QP.
+
+Data-driven / RL: a simple tabular or policy-gradient baseline (trained in simulation) for one scenario (clearly documented).
+
+For each controller and scenario:
+
+implement discrete-time simulation (sampling period τ), saturate inputs with U constraints and add bounded disturbances W per the lecture file;
+
+design or compute gains (analytically when possible), and provide a short Lyapunov-based stability certificate (construct candidate V(x), show ΔV ≤ 0 / negative definite where possible, or numerically verify along simulated trajectories if analytic is intractable).
+
+Provide symbolic-control tasks: reachability (go to goal set), safety / avoidance (avoid polygonal obstacles), recurrence/patrolling (visit a set of regions repeatedly). Formalize at least one of these as an LTL or finite automaton and synthesize a discrete controller (e.g., via graph abstraction / grid decomposition).
+
+Interactive visualization: a Python notebook / small GUI that allows the user to draw: start state(s), goal region(s), and polygonal obstacles / allowed zones. The tool should then: discretize the workspace, synthesize symbolic plan (if relevant), compute and display closed-loop trajectories for chosen controllers. (Use matplotlib interaction or ipywidgets.)
+
+Testing & reproducibility: include unit tests (pytest) that run short sims and check invariants (e.g., safety holds, error converges under specified conditions). Provide CI-ready commands (pytest, python run_all.py).
+
+Report: programmatically generate a markdown report summarizing each experiment (figures + numerical metrics: settling time, overshoot, input energy, robustness to disturbance, violation count for safety). Include a short “limitations & lessons” paragraph per controller.
+
+Code quality: PEP8, docstrings for all modules/functions, and example notebooks that demonstrate each capability. Use modular structure so new controllers can be added easily.
+
+Deliver a package that contains
+
+README.md with how-to-run, dependencies, and short description.
+
+models/ (model definitions).
+
+controllers/ (each controller in separate module implementing a standard interface).
+
+sim/ (simulation engine, plotting, disturbance injection).
+
+symbolic/ (grid abstraction, LTL translator/synthesizer or simple automata-based planner).
+
+notebooks/ interactive demos for each robot.
+
+tests/ pytest test-suite.
+
+report/ automatically-generated markdown + figures.
+
+Expectations for outputs
+
+For each robot, deliver at least 4 controllers total across types (so across three robots you should showcase ~12 designs). For at least one model include RL and MPC.
+
+Include concrete Lyapunov functions or constructive analysis (for integrator, quadratic V; for manipulator energy-based V; for unicycle use control-Lyapunov function or LaSalle arguments). Where analytic proof is impossible, provide rigorous numerical verification across randomized initial conditions and disturbances.
+
+Show tradeoffs: sample complexity (if RL), computation time per control step (for MPC), conservatism (for symbolic abstraction), region of attraction estimates, and robustness margins.
+
+Deliver the first run now: generate the code + run a smoke test for Model 1 (integrator) implementing (a) a proportional controller, (b) LQR, and (c) a symbolic reach-avoid plan. Provide plots of trajectories, Lyapunov function evolution, and a short markdown summary. If any dependency is missing, install via pip. Stop only when the smoke test passes locally.
+
+Extra credit (optional, but expected to stand out)
+
+Provide an interactive matplotlib canvas where a user draws arbitrary polygonal obstacles and goal regions and the agent recomputes a safe plan online.
+
+Add automatic export of animations (mp4/gif) for each experiment.
+
+Implementation notes for the agent (developer hints)
+
+Use numpy, scipy, matplotlib, shapely (for polygons), networkx (for abstraction/graphs), control or python-control for LQR, and casadi only if you implement MPC numerically. For RL use stable-baselines3 or a minimal policy-gradient implemented from scratch if dependencies are heavy.
+
+Keep each controller implementing compute_control(x, t) with signature (u, diagnostics) so the simulator is controller-agnostic.
+
+Provide deterministic random seeds for reproducibility.
+
+Important — style + verification
+
+Document assumptions, sampling period τ, and how disturbances W are applied per-step. Cite the lecture file for model equations. 
+
+Symbolic_control_lecture-7
+
+Where code approximates proofs (e.g., numerical Lyapunov checks), include comments explaining limitations and whether guarantees are formal or empirical.
+
+
+Model 1 — Integrator model (discrete)
+
+x1(t+1) = x1(t) + τ ( u1(t) + w1(t) )
+x2(t+1) = x2(t) + τ ( u2(t) + w2(t) )
+
+
+Sampling period: τ.
+
+State constraints: X = [−10,10] × [−10,10].
+
+Input constraints: U = [−1,1] × [−1,1].
+
+Disturbance set: W = [−0.05, 0.05] × [−0.05, 0.05].
+
+Model 2 — Unicycle (discrete)
+
+x1(t+1) = x1(t) + τ ( u1(t) * cos(x3(t)) + w1(t) )
+x2(t+1) = x2(t) + τ ( u1(t) * sin(x3(t)) + w2(t) )
+x3(t+1) = x3(t) + τ ( u2(t) + w3(t) )   (mod 2π)
+
+
+State constraints: X = [0,10] × [0,10] × [−π,π].
+
+Input constraints: U = [0.25,1] × [−1,1].
+
+Disturbance set: W = [−0.05,0.05]³.
+
+Model 3 — Two-link planar manipulator (discrete via Euler)
+
+x(t+1) = x(t) + τ * f(x(t), u(t))
+where x = [θ, θ̇], and
+f(x,u) = [ θ̇ ;
+           M(θ)^{-1} ( u − c(θ, θ̇) − g(θ) ) ]
+
+
+Parameters: m1=m2=1.0 kg, ℓ1=ℓ2=0.5 m, g=9.81 m/s² (numerical constants given).
+
+x ∈ R⁴ (two joint angles and velocities), u ∈ R² torques.
