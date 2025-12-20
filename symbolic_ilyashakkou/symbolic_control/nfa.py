@@ -11,10 +11,37 @@ Supported syntax:
     - Union: A|B (visit A or B)
     - Kleene star: A* (visit A zero or more times)
     - Parentheses: (A|B)C
+    - Negative char class: [^XY] (matches any symbol EXCEPT X and Y)
+    
+Obstacle avoidance example:
+    - A[^O]*B : Go to A, then navigate to B while avoiding region O
+    - A[^CD]*B : Go to A, then navigate to B while avoiding C and D
 """
 
 import numpy as np
 from dataclasses import dataclass
+
+
+# =============================================================================
+# Negative Symbol Set (for [^...] syntax)
+# =============================================================================
+
+class NegativeSymbolSet(frozenset):
+    """
+    Represents a negative character class [^...] in regex.
+    
+    A transition labeled with NegativeSymbolSet({A, B}) fires when
+    the input symbol is anything EXCEPT A or B.
+    
+    Example: [^CD] matches any symbol except C and D.
+    """
+    
+    def __repr__(self):
+        return f"[^{''.join(sorted(self))}]"
+    
+    def matches(self, symbol) -> bool:
+        """Check if symbol matches this negative set (i.e., symbol NOT in set)."""
+        return symbol is not None and symbol not in self
 
 
 # =============================================================================
@@ -53,18 +80,41 @@ class NFA:
         
         Self-loop semantics: If symbol is not in alphabet (e.g., None for free space),
         the NFA stays in place (implicit self-loops on unrecognized symbols).
+        
+        Negative transitions: A transition labeled with NegativeSymbolSet fires
+        when the symbol is NOT in the exclusion set.
         """
         # First: epsilon closure of current states
         current_closure = self._epsilon_closure(current_states)
         
-        # If symbol not in alphabet, stay in place (implicit self-loop)
-        if symbol not in self.alphabet:
-            return current_closure
-        
-        # Take symbol transitions
+        # Take symbol transitions (including negative symbol sets)
         next_states = set()
         for s in current_closure:
+            # Check exact symbol match
             next_states |= self.transitions.get((s, symbol), set())
+            
+            # Check negative symbol set transitions
+            for (from_state, label), to_states in self.transitions.items():
+                if from_state == s and isinstance(label, NegativeSymbolSet):
+                    if label.matches(symbol):
+                        next_states |= to_states
+        
+        # Check if symbol is "recognized" by the alphabet
+        # A symbol is recognized if it's explicitly in the alphabet OR
+        # if it's covered by a NegativeSymbolSet (either matches or is excluded)
+        symbol_recognized = symbol in self.alphabet
+        if not symbol_recognized:
+            for alpha_sym in self.alphabet:
+                if isinstance(alpha_sym, NegativeSymbolSet):
+                    # This negative set "knows about" the symbol domain
+                    # If symbol is in the excluded set, it's explicitly blocked
+                    # If symbol matches, it was already handled above
+                    symbol_recognized = True
+                    break
+        
+        # If no transitions taken and symbol not recognized, stay in place
+        if not next_states and not symbol_recognized:
+            return current_closure
         
         # Epsilon closure of result
         return self._epsilon_closure(next_states)
@@ -172,13 +222,33 @@ class RegexParser:
         return base
     
     def _parse_base(self) -> _Fragment:
-        """base → symbol | '(' expr ')' | '<' multi_char_symbol '>'"""
+        """base → symbol | '(' expr ')' | '<' multi_char_symbol '>' | '[^' chars ']'"""
         c = self._current()
         if c == '(':
             self._consume('(')
             frag = self._parse_expr()
             self._consume(')')
             return frag
+        if c == '[':
+            # Negative character class: [^ABC]
+            self._consume('[')
+            if self._current() != '^':
+                raise ValueError("Expected '^' after '[' (only [^...] syntax is supported)")
+            self._consume('^')
+            # Parse single-char symbols until ']'
+            excluded = set()
+            while self._current() and self._current() != ']':
+                ch = self._consume()
+                if ch.isalnum():
+                    excluded.add(ch)
+                # Skip commas/spaces if user writes [^A,B,C] or [^A B C]
+                elif ch not in (',', ' '):
+                    raise ValueError(f"Unexpected character in [^...]: {ch}")
+            self._consume(']')
+            if not excluded:
+                # [^] with no exclusions = match ANY symbol (wildcard)
+                return self._wildcard()
+            return self._negative_symbol(excluded)
         if c == '<':
             # Multi-character symbol: <region1>
             self._consume('<')
@@ -208,6 +278,21 @@ class RegexParser:
     def _symbol(self, sym: str) -> _Fragment:
         s1, s2 = self._new_state(), self._new_state()
         self.nfa.add_transition(s1, sym, s2)
+        return _Fragment(s1, s2)
+    
+    def _negative_symbol(self, excluded: set) -> _Fragment:
+        """Create a fragment that matches any symbol EXCEPT those in excluded."""
+        s1, s2 = self._new_state(), self._new_state()
+        neg_set = NegativeSymbolSet(excluded)
+        self.nfa.add_transition(s1, neg_set, s2)
+        return _Fragment(s1, s2)
+    
+    def _wildcard(self) -> _Fragment:
+        """Create a fragment that matches ANY symbol (empty negative set)."""
+        s1, s2 = self._new_state(), self._new_state()
+        # NegativeSymbolSet with empty exclusions matches everything
+        neg_set = NegativeSymbolSet(set())
+        self.nfa.add_transition(s1, neg_set, s2)
         return _Fragment(s1, s2)
     
     def _concat(self, left: _Fragment, right: _Fragment) -> _Fragment:

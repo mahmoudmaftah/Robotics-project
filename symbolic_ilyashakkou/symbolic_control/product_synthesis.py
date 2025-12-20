@@ -11,17 +11,21 @@ The problem of satisfying the specification on the original system becomes
 a simple reachability problem on the Product Automaton.
 
 Pipeline:
-    1. Safety synthesis on physical abstraction (obstacle avoidance)
+    1. Transition pruning (remove boundary cells with no valid controls)
     2. Build NFA from regex specification
     3. Construct Product Automaton (NFA states × grid cells)
     4. Run reachability synthesis on product to find winning states
     5. Extract controller that satisfies the specification
 
+Note: Obstacle/region avoidance is specified directly in the regex using [^...]:
+    - "A[^O]*B"  : Go from A to B, avoiding region O
+    - "A[^]*B"   : Go from A to B through any cells (wildcard)
+
 Example specs:
     - "AB"           : Visit region A, then region B
     - "A|B"          : Visit region A or region B
     - "(A|B)C"       : Visit A or B, then visit C
-    - "<goal>*<end>" : Visit goal any number of times, then reach end
+    - "A[^O]*B"      : Visit A, avoid O, then visit B
 """
 
 import random
@@ -141,9 +145,6 @@ class ProductAutomaton:
     def build(self, verbose: bool = True) -> None:
         """
         Build the Product Automaton via BFS from initial states.
-        
-        Only explores transitions in the SafeAutomaton (obstacle avoidance
-        is already handled).
         """
         if verbose:
             print("=" * 50)
@@ -239,24 +240,26 @@ class ProductSynthesis:
     Controller synthesis for automata-based specifications.
     
     Combines:
-        1. Safety synthesis (obstacle avoidance)
-        2. Product automaton construction (physical × spec NFA)
-        3. Reachability synthesis on product (reach accepting states)
+        1. Product automaton construction (physical abstraction × spec NFA)
+        2. Reachability synthesis on product (reach accepting states)
+    
+    Obstacle avoidance is specified directly in the regex using [^...] syntax:
+        - "A[^O]*B" : Go to A, then to B while avoiding region O
+        - "A[^CD]*B" : Go to A, then to B while avoiding regions C and D
     
     Usage:
         # Define regions
         regions = {
             'A': [-4, -3, 3, 4],      # [x_min, x_max, y_min, y_max]
             'B': [3, 4, 3, 4],
-            'obstacle': [-1, 1, -1, 1]
+            'O': [-1, 1, -1, 1]       # Obstacle region
         }
         
-        # Create synthesis
+        # Create synthesis (obstacles in regex via [^O])
         synth = ProductSynthesis(
             abstraction=abstraction,
-            obstacles={'obstacle'},  # Region names to avoid
             regions=regions,
-            spec="AB"               # Visit A, then B
+            spec="A[^O]*B"           # Visit A, avoid O, then B
         )
         synth.run()
         
@@ -267,34 +270,28 @@ class ProductSynthesis:
     def __init__(
         self,
         abstraction: Abstraction,
-        obstacles: Set[str],
         regions: Dict[str, List[float]],
         spec: str
     ):
         """
         Args:
             abstraction: Grid abstraction with precomputed transitions
-            obstacles: Set of region NAMES to avoid (e.g., {'obstacle'})
             regions: Dict mapping region names to bounds [x_min, x_max, y_min, y_max]
-            spec: Regular expression specification (e.g., "AB", "(A|B)C")
+            spec: Regular expression specification with optional [^...] for avoidance
+                  (e.g., "AB", "A[^O]*B", "(A|B)[^CD]*E")
         """
         self.abstraction = abstraction
-        self.obstacle_names = obstacles
         self.regions = regions
         self.spec = spec
         
-        # Build obstacle cells from region names
-        self.obstacle_cells = self._regions_to_cells(obstacles)
-        
-        # Build labeler for non-obstacle regions
+        # Build labeler for all regions
         self.labeler = RegionLabeler()
         for name, bounds in regions.items():
-            if name not in obstacles:
-                # Convert [x_min, x_max, y_min, y_max] to [[x_min, x_max], [y_min, y_max]]
-                self.labeler.add_region(name, [
-                    [bounds[0], bounds[1]],
-                    [bounds[2], bounds[3]]
-                ])
+            # Convert [x_min, x_max, y_min, y_max] to [[x_min, x_max], [y_min, y_max]]
+            self.labeler.add_region(name, [
+                [bounds[0], bounds[1]],
+                [bounds[2], bounds[3]]
+            ])
         
         # Build NFA from spec
         self.nfa = regex_to_nfa(spec)
@@ -306,26 +303,6 @@ class ProductSynthesis:
         self.reach_sets: List[Set[ProductState]] = []
         self.controller: Dict[ProductState, List[int]] = {}
     
-    def _regions_to_cells(self, region_names: Set[str]) -> Set[int]:
-        """Convert region names to cell indices."""
-        cells = set()
-        nx, ny = self.abstraction.grid_shape
-        
-        for i in range(nx):
-            for j in range(ny):
-                # Cell center
-                cx = self.abstraction.state_bounds[0, 0] + (i + 0.5) * self.abstraction.eta
-                cy = self.abstraction.state_bounds[1, 0] + (j + 0.5) * self.abstraction.eta
-                
-                for name in region_names:
-                    if name in self.regions:
-                        bounds = self.regions[name]
-                        if bounds[0] <= cx < bounds[1] and bounds[2] <= cy < bounds[3]:
-                            cell_idx = np.ravel_multi_index((i, j), self.abstraction.grid_shape)
-                            cells.add(cell_idx)
-        
-        return cells
-    
     def run(self, verbose: bool = True) -> Set[ProductState]:
         """
         Run the full synthesis pipeline.
@@ -333,13 +310,15 @@ class ProductSynthesis:
         Returns:
             Winning set of ProductStates
         """
-        # Step 1: Safety synthesis
+        # Step 1: Prune cells with no valid controls (boundary cells that force robot out)
+        # Note: This is NOT obstacle avoidance - obstacles are handled by [^...] in the regex.
+        # This just removes cells where the robot physically cannot stay in bounds.
         if verbose:
             print(f"Specification: {self.spec}")
             print(f"NFA states: {len(self.nfa.states)}, alphabet: {self.nfa.alphabet}")
             print()
         
-        safe_spec = set(range(self.abstraction.num_cells)) - self.obstacle_cells
+        safe_spec = set(range(self.abstraction.num_cells))
         self.safe_automaton = compute_safe_automaton(
             self.abstraction, safe_spec, verbose=verbose
         )
@@ -427,7 +406,7 @@ class ProductSynthesis:
             print(f"Winning cells: {len(winning_cells)} ({pct:.1f}%)")
         
         # Extract controller
-        controller = self._extract_controller(target, reach_sets)
+        controller = self._extract_controller(reach_sets)
         
         if verbose:
             print(f"Controller covers {len(controller)} product states")
@@ -437,7 +416,6 @@ class ProductSynthesis:
     
     def _extract_controller(
         self,
-        target: Set[ProductState],
         reach_sets: List[Set[ProductState]]
     ) -> Dict[ProductState, List[int]]:
         """Extract controller from reachability layers."""
