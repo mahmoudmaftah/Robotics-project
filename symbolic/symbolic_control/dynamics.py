@@ -10,15 +10,6 @@ import numpy as np
 
 
 class Dynamics(ABC):
-    """
-    Abstract base class for dynamical systems.
-
-    Any concrete model must implement:
-    - post(): Over-approximated successor set (for abstraction)
-    - step(): Exact next state (for simulation)
-    - state_dim, control_set: System properties
-    """
-
     @property
     def disturbance_dim(self) -> int:
         """Dimension of the disturbance vector. Override if different from state_dim."""
@@ -33,6 +24,14 @@ class Dynamics(ABC):
     def w_max(self) -> np.ndarray:
         """Maximum disturbance (vector)."""
         return self.w_bound * np.ones(self.disturbance_dim)
+    """
+    Abstract base class for dynamical systems.
+    
+    Any concrete model must implement:
+    - post(): Over-approximated successor set (for abstraction)
+    - step(): Exact next state (for simulation)
+    - state_dim, control_set: System properties
+    """
     
     @abstractmethod
     def post(self, x_lo: np.ndarray, x_hi: np.ndarray, u: np.ndarray) -> tuple:
@@ -140,26 +139,25 @@ class IntegratorDynamics(Dynamics):
 
 
 class UnicycleDynamics(Dynamics):
+    @property
+    def disturbance_dim(self) -> int:
+        return 3
     """
     3D Unicycle model (mobile robot with heading).
-
+    
     Dynamics:
         x1(t+1) = x1(t) + τ * (u1 * cos(x3(t)) + w1)
         x2(t+1) = x2(t) + τ * (u1 * sin(x3(t)) + w2)
         x3(t+1) = x3(t) + τ * (u2 + w3)  (mod 2π, wrapped to [-π, π])
-
+    
     where:
         - (x1, x2) is position, x3 is heading angle
         - u1 is linear velocity, u2 is angular velocity
         - w = (w1, w2, w3) is disturbance
-
+    
     This system is NON-MONOTONE due to sin/cos terms.
     We use Jacobian-based growth bounds for over-approximation.
     """
-
-    @property
-    def disturbance_dim(self) -> int:
-        return 3
     
     def __init__(self, tau=1.0, w_bound=0.05, v_values=None, omega_values=None):
         """
@@ -299,49 +297,42 @@ class UnicycleDynamics(Dynamics):
             else:
                 succ_lo[2] = theta_lo_wrapped
                 succ_hi[2] = theta_hi_wrapped
-
+        
         return succ_lo, succ_hi
 
 
 class ManipulatorDynamics(Dynamics):
     """
-    Two-link Planar Manipulator (discrete via Euler).
-
-    State: x = [θ1, θ2, θ̇1, θ̇2] (joint angles and velocities)
-    Input: u = [τ1, τ2] (joint torques)
-
+    4D Two-Link Planar Robotic Manipulator.
+    
+    State: x = [θ₁, θ₂, θ̇₁, θ̇₂] (joint angles and velocities)
+    Control: u = [τ₁, τ₂] (joint torques)
+    
     Dynamics:
         x(t+1) = x(t) + τ * f(x(t), u(t))
-        where f(x,u) = [θ̇; M(θ)^{-1}(u - C(θ,θ̇)θ̇ - g(θ))]
-
-    Parameters (from models.txt):
-        m1 = m2 = 1.0 kg (link masses)
-        l1 = l2 = 0.5 m (link lengths)
-        g = 9.81 m/s² (gravity)
-
-    This system is NON-MONOTONE due to sin/cos and coupling terms.
-    Uses Jacobian-based growth bounds for over-approximation.
+        
+        f(x, u) = [θ̇, M(θ)⁻¹(u - c(θ, θ̇) - g(θ))]
+    
+    where:
+        M(θ) = mass matrix (2x2)
+        c(θ, θ̇) = Coriolis/centrifugal forces (2x1)
+        g(θ) = gravity forces (2x1)
+    
+    This system is NON-MONOTONE due to trigonometric nonlinearities.
+    We use sampling-based over-approximation for the post() method.
     """
-
-    def __init__(
-        self,
-        tau: float = 0.01,
-        w_bound: float = 0.01,
-        m1: float = 1.0,
-        m2: float = 1.0,
-        l1: float = 0.5,
-        l2: float = 0.5,
-        g_accel: float = 9.81,
-        torque_values: list = None
-    ):
+    
+    def __init__(self, tau=0.1, w_bound=0.01, 
+                 m1=1.0, m2=1.0, l1=0.5, l2=0.5, gravity=9.81,
+                 torque_values=None):
         """
         Args:
-            tau: Sampling period (should be small for stability, e.g., 0.01)
-            w_bound: Disturbance bound
+            tau: Sampling period
+            w_bound: Disturbance bound (symmetric)
             m1, m2: Link masses (kg)
             l1, l2: Link lengths (m)
-            g_accel: Gravitational acceleration (m/s²)
-            torque_values: List of torque values per joint (default: [-5, -2.5, 0, 2.5, 5])
+            gravity: Gravitational acceleration (m/s²)
+            torque_values: List of torque values for each joint
         """
         self.tau = tau
         self.w_bound = w_bound
@@ -349,157 +340,179 @@ class ManipulatorDynamics(Dynamics):
         self.m2 = m2
         self.l1 = l1
         self.l2 = l2
-        self.g_accel = g_accel
-
+        self.gravity = gravity
+        
+        # Default torque discretization
         if torque_values is None:
-            torque_values = [-5.0, -2.5, 0.0, 2.5, 5.0]
-
-        # Build control set: all combinations of (τ1, τ2)
+            torque_values = [-10.0, -5.0, 0.0, 5.0, 10.0]
+        
+        self.torque_values = np.array(torque_values)
+        
+        # Build control set: all combinations of (τ₁, τ₂)
         self._control_set = [
             np.array([t1, t2])
             for t1 in torque_values
             for t2 in torque_values
         ]
-
-        # Pre-compute constants for Jacobian bounds
-        self.max_torque = max(abs(t) for t in torque_values)
-
+    
     @property
     def state_dim(self) -> int:
         return 4
-
+    
     @property
     def disturbance_dim(self) -> int:
         return 4
-
+    
     @property
     def control_set(self) -> list:
         return self._control_set
-
-    def _mass_matrix(self, theta2: float) -> np.ndarray:
-        """Compute mass matrix M(θ)."""
-        m1, m2, l1, l2 = self.m1, self.m2, self.l1, self.l2
+    
+    def _mass_matrix(self, theta: np.ndarray) -> np.ndarray:
+        """
+        Compute the mass matrix M(θ).
+        
+        M = [M11, M12]
+            [M21, M22]
+        """
+        theta1, theta2 = theta
         c2 = np.cos(theta2)
-
-        M11 = (m1 + m2) * l1**2 + m2 * l2**2 + 2 * m2 * l1 * l2 * c2
-        M12 = m2 * l2**2 + m2 * l1 * l2 * c2
+        
+        m1, m2 = self.m1, self.m2
+        l1, l2 = self.l1, self.l2
+        
+        M11 = m1 * l1**2 + m2 * (l1**2 + 2*l1*l2*c2 + l2**2)
+        M12 = m2 * (l1*l2*c2 + l2**2)
+        M21 = M12
         M22 = m2 * l2**2
-
-        return np.array([[M11, M12], [M12, M22]])
-
-    def _coriolis_vector(self, theta2: float, dtheta1: float, dtheta2: float) -> np.ndarray:
-        """Compute Coriolis/centrifugal term C(θ,θ̇)θ̇."""
-        m2, l1, l2 = self.m2, self.l1, self.l2
+        
+        return np.array([[M11, M12], [M21, M22]])
+    
+    def _coriolis(self, theta: np.ndarray, theta_dot: np.ndarray) -> np.ndarray:
+        """
+        Compute Coriolis/centrifugal forces c(θ, θ̇).
+        """
+        theta1, theta2 = theta
+        dtheta1, dtheta2 = theta_dot
         s2 = np.sin(theta2)
+        
+        m2 = self.m2
+        l1, l2 = self.l1, self.l2
+        
         h = m2 * l1 * l2 * s2
-
-        c1 = -h * dtheta2 * (2 * dtheta1 + dtheta2)
+        
+        c1 = -h * (2*dtheta1*dtheta2 + dtheta2**2)
         c2 = h * dtheta1**2
-
+        
         return np.array([c1, c2])
-
-    def _gravity_vector(self, theta1: float, theta2: float) -> np.ndarray:
-        """Compute gravity term g(θ)."""
-        m1, m2, l1, l2, g = self.m1, self.m2, self.l1, self.l2, self.g_accel
-        s1 = np.sin(theta1)
-        s12 = np.sin(theta1 + theta2)
-
-        g1 = (m1 + m2) * g * l1 * s1 + m2 * g * l2 * s12
-        g2 = m2 * g * l2 * s12
-
+    
+    def _gravity_forces(self, theta: np.ndarray) -> np.ndarray:
+        """
+        Compute gravity forces g(θ).
+        """
+        theta1, theta2 = theta
+        c1 = np.cos(theta1)
+        c12 = np.cos(theta1 + theta2)
+        
+        m1, m2 = self.m1, self.m2
+        l1, l2 = self.l1, self.l2
+        g = self.gravity
+        
+        g1 = (m1 + m2) * g * l1 * c1 + m2 * g * l2 * c12
+        g2 = m2 * g * l2 * c12
+        
         return np.array([g1, g2])
-
-    def _dynamics(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
-        """
-        Compute f(x, u) = [θ̇; M⁻¹(u - C - g)].
-
-        Args:
-            x: State [θ1, θ2, θ̇1, θ̇2]
-            u: Control [τ1, τ2]
-
-        Returns:
-            dx/dt: [θ̇1, θ̇2, θ̈1, θ̈2]
-        """
-        theta1, theta2, dtheta1, dtheta2 = x
-
-        M = self._mass_matrix(theta2)
-        C = self._coriolis_vector(theta2, dtheta1, dtheta2)
-        G = self._gravity_vector(theta1, theta2)
-
-        # θ̈ = M⁻¹(u - C - G)
-        M_inv = np.linalg.inv(M)
-        ddtheta = M_inv @ (u - C - G)
-
-        return np.array([dtheta1, dtheta2, ddtheta[0], ddtheta[1]])
-
+    
     def step(self, x: np.ndarray, u: np.ndarray, w: np.ndarray) -> np.ndarray:
         """
-        Compute exact next state (Euler integration with disturbance).
-
+        Exact state update for simulation.
+        
         Args:
-            x: Current state [θ1, θ2, θ̇1, θ̇2]
-            u: Control [τ1, τ2]
-            w: Disturbance [w1, w2, w3, w4]
-
+            x: State [θ₁, θ₂, θ̇₁, θ̇₂]
+            u: Control [τ₁, τ₂]
+            w: Disturbance [w₁, w₂, w₃, w₄]
+            
         Returns:
             Next state
         """
-        f = self._dynamics(x, u)
-        return x + self.tau * (f + w)
-
+        theta = x[:2]
+        theta_dot = x[2:]
+        
+        # Compute dynamics
+        M = self._mass_matrix(theta)
+        c = self._coriolis(theta, theta_dot)
+        g = self._gravity_forces(theta)
+        
+        # Joint accelerations: θ̈ = M⁻¹(u - c - g)
+        theta_ddot = np.linalg.solve(M, u - c - g)
+        
+        # Euler integration with disturbance
+        theta_new = theta + self.tau * (theta_dot + w[:2])
+        theta_dot_new = theta_dot + self.tau * (theta_ddot + w[2:])
+        
+        return np.array([theta_new[0], theta_new[1], theta_dot_new[0], theta_dot_new[1]])
+    
     def post(self, x_lo: np.ndarray, x_hi: np.ndarray, u: np.ndarray) -> tuple:
         """
-        Over-approximation using sampling + Lipschitz margin.
-
-        For complex non-monotone dynamics like the manipulator, we use:
-        1. Sample vertices and center of the cell
-        2. Compute dynamics at each sample point
-        3. Take bounding box of results
-        4. Add margin for disturbance and Lipschitz continuity
+        Over-approximation using sampling at corners and center.
+        
+        For this highly nonlinear system, we sample the cell corners
+        and center, then expand by the Lipschitz constant estimate.
         """
-        # Sample the cell vertices and center (2^4 = 16 vertices + center = 17 points)
-        # For efficiency, we sample corners and center
+        # Sample points: corners + center
         samples = []
-        for i in range(2):
-            for j in range(2):
-                for k in range(2):
-                    for l in range(2):
-                        x = np.array([
-                            x_lo[0] if i == 0 else x_hi[0],
-                            x_lo[1] if j == 0 else x_hi[1],
-                            x_lo[2] if k == 0 else x_hi[2],
-                            x_lo[3] if l == 0 else x_hi[3],
-                        ])
-                        samples.append(x)
-
-        # Add center point
+        
+        # Center
         x_center = (x_lo + x_hi) / 2
         samples.append(x_center)
-
-        # Compute dynamics at all sample points
-        w_zero = np.zeros(4)
-        successors = []
-        for x in samples:
-            x_next = self.step(x, u, w_zero)
-            successors.append(x_next)
-
-        successors = np.array(successors)
-
-        # Bounding box of sampled successors
-        succ_lo = np.min(successors, axis=0)
-        succ_hi = np.max(successors, axis=0)
-
-        # Add margin for:
-        # 1. Disturbance: tau * w_bound
-        # 2. Lipschitz continuity within each sub-cell (small margin)
+        
+        # Corners (2^4 = 16 corners for 4D)
+        for i in range(16):
+            corner = np.array([
+                x_lo[0] if (i & 1) == 0 else x_hi[0],
+                x_lo[1] if (i & 2) == 0 else x_hi[1],
+                x_lo[2] if (i & 4) == 0 else x_hi[2],
+                x_lo[3] if (i & 8) == 0 else x_hi[3],
+            ])
+            samples.append(corner)
+        
+        # Compute transitions for all samples with extreme disturbances
+        w_lo = self.w_min
+        w_hi = self.w_max
+        
+        all_successors = []
+        for x_sample in samples:
+            # Try with min and max disturbance
+            for w in [w_lo, w_hi, np.zeros(4)]:
+                try:
+                    succ = self.step(x_sample, u, w)
+                    all_successors.append(succ)
+                except np.linalg.LinAlgError:
+                    # Singular matrix - skip this sample
+                    continue
+        
+        if not all_successors:
+            # Fallback: return empty (will be pruned)
+            return x_lo.copy(), x_lo.copy()
+        
+        all_successors = np.array(all_successors)
+        
+        # Bounding box of all samples
+        succ_lo = np.min(all_successors, axis=0)
+        succ_hi = np.max(all_successors, axis=0)
+        
+        # Add margin for Lipschitz continuity
+        # The dynamics are Lipschitz, so we add a safety margin
         delta_x = (x_hi - x_lo) / 2
-        lipschitz_margin = 0.1 * self.tau * np.max(delta_x)  # Conservative Lipschitz margin
-        disturbance_margin = self.tau * self.w_bound
-
-        total_margin = disturbance_margin + lipschitz_margin
-
-        succ_lo = succ_lo - total_margin
-        succ_hi = succ_hi + total_margin
-
+        delta_w = np.array([self.w_bound] * 4)
+        
+        # Conservative Lipschitz estimate
+        L_x = 1.0 + self.tau * 10.0  # Conservative bound
+        L_w = self.tau
+        
+        margin = L_x * np.max(delta_x) * 0.5 + L_w * np.max(delta_w)
+        
+        succ_lo -= margin
+        succ_hi += margin
+        
         return succ_lo, succ_hi
 

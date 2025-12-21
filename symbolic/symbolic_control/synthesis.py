@@ -329,6 +329,13 @@ class Synthesis:
                 return k
         return -1
     
+    @property
+    def safe_set(self) -> Set[int]:
+        """Get the safe set (maximal controlled invariant set)."""
+        if self.safe_automaton is None:
+            return set()
+        return self.safe_automaton.safe_states
+    
     def is_safe(self, cell_idx: int) -> bool:
         """Check if a cell is in the safe set."""
         if self.safe_automaton is None:

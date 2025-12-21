@@ -19,22 +19,31 @@ class Abstraction:
     transitions between cells using over-approximation.
     """
     
-    def __init__(self, dynamics: Dynamics, state_bounds: np.ndarray, eta: float):
+    def __init__(self, dynamics: Dynamics, state_bounds: np.ndarray, eta):
         """
         Args:
             dynamics: A Dynamics object (e.g., IntegratorDynamics)
             state_bounds: Array of shape (state_dim, 2) with [min, max] per dimension
                           Example: [[-10, 10], [-10, 10]] for 2D
-            eta: Grid cell size (same for all dimensions)
+            eta: Grid cell size. Can be:
+                 - A single float (same for all dimensions)
+                 - A list/array of floats (one per dimension)
         """
         self.dynamics = dynamics
         self.state_bounds = np.array(state_bounds)
-        self.eta = eta
         
-        # Compute grid dimensions
+        # Handle per-dimension eta
+        if isinstance(eta, (int, float)):
+            self.eta = np.array([float(eta)] * dynamics.state_dim)
+        else:
+            self.eta = np.array(eta, dtype=float)
+            if len(self.eta) != dynamics.state_dim:
+                raise ValueError(f"eta must have {dynamics.state_dim} elements, got {len(self.eta)}")
+        
+        # Compute grid dimensions (different for each dimension now)
         self.grid_shape = tuple(
-            int(np.ceil((bounds[1] - bounds[0]) / eta))
-            for bounds in self.state_bounds
+            int(np.ceil((self.state_bounds[d, 1] - self.state_bounds[d, 0]) / self.eta[d]))
+            for d in range(dynamics.state_dim)
         )
         self.num_cells = int(np.prod(self.grid_shape))
         
@@ -52,10 +61,13 @@ class Abstraction:
         multi_idx = np.unravel_index(cell_idx, self.grid_shape)
         
         lo = np.array([
-            self.state_bounds[d, 0] + multi_idx[d] * self.eta
+            self.state_bounds[d, 0] + multi_idx[d] * self.eta[d]
             for d in range(self.dynamics.state_dim)
         ])
-        hi = lo + self.eta
+        hi = np.array([
+            lo[d] + self.eta[d]
+            for d in range(self.dynamics.state_dim)
+        ])
         
         return lo, hi
     
@@ -88,8 +100,8 @@ class Abstraction:
                 # No overlap with grid in this dimension
                 return set()
             
-            idx_lo = int((lo_clamped - self.state_bounds[d, 0]) / self.eta)
-            idx_hi = int(np.ceil((hi_clamped - self.state_bounds[d, 0]) / self.eta))
+            idx_lo = int((lo_clamped - self.state_bounds[d, 0]) / self.eta[d])
+            idx_hi = int(np.ceil((hi_clamped - self.state_bounds[d, 0]) / self.eta[d]))
             
             # Clamp to valid indices
             idx_lo = max(0, idx_lo)
@@ -104,7 +116,7 @@ class Abstraction:
         
         return cells
     
-    def build_transitions(self):
+    def build_transitions(self, progress_callback=None):
         """
         Compute all transitions for every (cell, control) pair.
         
@@ -112,8 +124,13 @@ class Abstraction:
             1. Get cell bounds [x_lo, x_hi]
             2. Compute over-approximated successor via dynamics.post()
             3. Find all cells overlapping with successor bounds
+            
+        Args:
+            progress_callback: Optional callable(current, total, message) for progress updates
         """
-        print(f"Building transitions for {self.num_cells} cells × {len(self.dynamics.control_set)} controls...")
+        total = self.num_cells
+        num_controls = len(self.dynamics.control_set)
+        print(f"Building transitions for {total} cells × {num_controls} controls...")
         
         for cell_idx in tqdm(range(self.num_cells)):
             x_lo, x_hi = self.cell_to_bounds(cell_idx)
@@ -126,6 +143,10 @@ class Abstraction:
                 succ_cells = self.bounds_to_cells(succ_lo, succ_hi)
                 
                 self.transitions[(cell_idx, u_idx)] = succ_cells
+            
+            # Call progress callback if provided
+            if progress_callback is not None and cell_idx % max(1, total // 100) == 0:
+                progress_callback(cell_idx + 1, total, f"Building transitions: {cell_idx + 1}/{total} cells")
         
         print(f"Done. Total transitions: {len(self.transitions)}")
     
@@ -138,7 +159,7 @@ class Abstraction:
         """Convert a continuous state to its cell index. Returns -1 if out of bounds."""
         multi_idx = []
         for d in range(self.dynamics.state_dim):
-            idx = int((x[d] - self.state_bounds[d, 0]) / self.eta)
+            idx = int((x[d] - self.state_bounds[d, 0]) / self.eta[d])
             # Check if out of bounds
             if idx < 0 or idx >= self.grid_shape[d]:
                 return -1  # Out of bounds

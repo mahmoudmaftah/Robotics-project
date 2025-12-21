@@ -1,8 +1,0 @@
-
-
---
-
-TODO:
-- obstacles should be part of the regex (e.g. "A[^CD]*B" to avoid C and D) - (DONE)
-- have a GUI where we set x bounds, u bounds, step function, obstacles, spec, etc. 
-- do the other models
