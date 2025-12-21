@@ -341,13 +341,17 @@ class RegionLabeler:
     def get_label(self, x: np.ndarray):
         """Get label of a point. Returns None if no region matches."""
         for name, bounds in self.regions:
-            if all(bounds[d, 0] <= x[d] <= bounds[d, 1] for d in range(len(x))):
+            # Only check dimensions defined in the region (e.g., ignore theta if region is 2D)
+            dims = min(len(x), len(bounds))
+            if all(bounds[d, 0] <= x[d] <= bounds[d, 1] for d in range(dims)):
                 return name
         return None
     
     def get_cell_label(self, cell_lo: np.ndarray, cell_hi: np.ndarray):
         """Get label if cell overlaps with any region. Returns None if no match."""
         for name, bounds in self.regions:
-            if all(cell_lo[d] < bounds[d, 1] and bounds[d, 0] < cell_hi[d] for d in range(len(cell_lo))):
+            # Only check dimensions defined in the region (e.g., ignore theta if region is 2D)
+            dims = min(len(cell_lo), len(bounds))
+            if all(cell_lo[d] < bounds[d, 1] and bounds[d, 0] < cell_hi[d] for d in range(dims)):
                 return name
         return None

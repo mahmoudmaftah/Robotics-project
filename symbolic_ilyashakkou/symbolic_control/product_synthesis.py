@@ -286,12 +286,24 @@ class ProductSynthesis:
         
         # Build labeler for all regions
         self.labeler = RegionLabeler()
-        for name, bounds in regions.items():
-            # Convert [x_min, x_max, y_min, y_max] to [[x_min, x_max], [y_min, y_max]]
-            self.labeler.add_region(name, [
-                [bounds[0], bounds[1]],
-                [bounds[2], bounds[3]]
-            ])
+        state_dim = abstraction.dynamics.state_dim
+        
+        for name, bounds_list in regions.items():
+            # Parse bounds list [min, max, min, max...] into [[min, max], [min, max], ...]
+            region_bounds = []
+            for i in range(0, len(bounds_list), 2):
+                region_bounds.append([bounds_list[i], bounds_list[i+1]])
+            
+            # If region has fewer dimensions than state space, pad with full state bounds
+            # This allows defining 2D regions for 3D systems (e.g., unicycle)
+            if len(region_bounds) < state_dim:
+                for d in range(len(region_bounds), state_dim):
+                    region_bounds.append([
+                        abstraction.state_bounds[d, 0],
+                        abstraction.state_bounds[d, 1]
+                    ])
+            
+            self.labeler.add_region(name, region_bounds)
         
         # Build NFA from spec
         self.nfa = regex_to_nfa(spec)
@@ -570,7 +582,8 @@ class ProductSynthesis:
             # Apply dynamics with random disturbance
             w_min = self.abstraction.dynamics.w_min
             w_max = self.abstraction.dynamics.w_max
-            w = np.random.uniform(w_min, w_max, size=2)
+            disturbance_dim = self.abstraction.dynamics.disturbance_dim
+            w = np.random.uniform(w_min, w_max, size=disturbance_dim)
             next_pos = self.abstraction.dynamics.step(pos, u, w)
             
             # Update NFA state

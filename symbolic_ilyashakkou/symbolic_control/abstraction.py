@@ -6,6 +6,7 @@ The grid and transitions are computed using the dynamics.post() method.
 """
 
 import numpy as np
+from tqdm.auto import tqdm
 from itertools import product
 from .dynamics import Dynamics
 
@@ -114,7 +115,7 @@ class Abstraction:
         """
         print(f"Building transitions for {self.num_cells} cells × {len(self.dynamics.control_set)} controls...")
         
-        for cell_idx in range(self.num_cells):
+        for cell_idx in tqdm(range(self.num_cells)):
             x_lo, x_hi = self.cell_to_bounds(cell_idx)
             
             for u_idx, u in enumerate(self.dynamics.control_set):
