@@ -125,8 +125,8 @@ class IntegratorDynamics(Dynamics):
         - Minimum successor: f(x_lo, u, w_min)
         - Maximum successor: f(x_hi, u, w_max)
         """
-        w_lo = np.array([self.w_min, self.w_min])
-        w_hi = np.array([self.w_max, self.w_max])
+        w_lo = self.w_min
+        w_hi = self.w_max
         
         succ_lo = self.step(x_lo, u, w_lo)
         succ_hi = self.step(x_hi, u, w_hi)
