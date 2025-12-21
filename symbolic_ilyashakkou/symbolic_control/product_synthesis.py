@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from collections import deque
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from .abstraction import Abstraction
 from .nfa import NFA, RegionLabeler, regex_to_nfa
@@ -103,23 +104,46 @@ class ProductAutomaton:
         self.nfa = nfa
         self.labeler = labeler
         self.abstraction = safe_automaton.abstraction
-        
+
         # Product automaton data
         self.states: Set[ProductState] = set()
         self.initial_states: Set[ProductState] = set()
         self.accepting_states: Set[ProductState] = set()
-        
+
         # Transitions: {(ProductState, u_idx): Set[ProductState]}
         self.transitions: Dict[Tuple[ProductState, int], Set[ProductState]] = {}
-        
+
         # Reverse map for controller lookup: cell_idx -> set of ProductStates
         self.cell_to_product_states: Dict[int, Set[ProductState]] = {}
-    
+
+        # Pre-compute cell labels for all cells (MAJOR PERFORMANCE OPTIMIZATION)
+        # This avoids calling cell_to_bounds + labeler.get_cell_label millions of times
+        self._cell_labels: Dict[int, Optional[str]] = {}
+        self._precompute_cell_labels()
+
+        # Cache for NFA transitions: (nfa_states, label) -> new_nfa_states
+        # This avoids recomputing the same NFA transition thousands of times
+        self._nfa_transition_cache: Dict[Tuple[FrozenSet[int], str], FrozenSet[int]] = {}
+
+    def _precompute_cell_labels(self) -> None:
+        """Pre-compute labels for all cells in the safe automaton."""
+        for cell_idx in self.safe_automaton.safe_states:
+            cell_lo, cell_hi = self.abstraction.cell_to_bounds(cell_idx)
+            self._cell_labels[cell_idx] = self.labeler.get_cell_label(cell_lo, cell_hi)
+
     def _get_cell_label(self, cell_idx: int) -> Optional[str]:
-        """Get the label of a grid cell."""
-        cell_lo, cell_hi = self.abstraction.cell_to_bounds(cell_idx)
-        return self.labeler.get_cell_label(cell_lo, cell_hi)
-    
+        """Get the label of a grid cell (cached lookup)."""
+        return self._cell_labels.get(cell_idx)
+
+    def _get_nfa_transition(self, nfa_states: FrozenSet[int], label: str) -> FrozenSet[int]:
+        """Get NFA transition result with caching."""
+        cache_key = (nfa_states, label)
+        if cache_key not in self._nfa_transition_cache:
+            self._nfa_transition_cache[cache_key] = frozenset(
+                self.nfa.get_next_states(set(nfa_states), label)
+            )
+        return self._nfa_transition_cache[cache_key]
+
     def _make_product_state(
         self,
         nfa_states: FrozenSet[int],
@@ -128,15 +152,15 @@ class ProductAutomaton:
     ) -> ProductState:
         """
         Create a ProductState, handling label emission logic.
-        
+
         If the cell has a label different from prev_label, we emit it
         (advancing the NFA). Otherwise, we keep the same NFA states.
         """
         current_label = self._get_cell_label(cell_idx)
-        
+
         if current_label is not None and current_label != prev_label:
-            # New region: emit label and advance NFA
-            new_nfa_states = frozenset(self.nfa.get_next_states(set(nfa_states), current_label))
+            # New region: emit label and advance NFA (using cached transition)
+            new_nfa_states = self._get_nfa_transition(nfa_states, current_label)
             return ProductState(new_nfa_states, cell_idx, current_label)
         else:
             # Same region or no region: NFA stays (implicit self-loop)
@@ -177,15 +201,15 @@ class ProductAutomaton:
         if verbose:
             print(f"Initial product states: {len(self.initial_states)}")
             print(f"Accepting in initial: {len(self.accepting_states)}")
-        
-        # BFS exploration
+
+        # BFS exploration with progress bar
         explored = 0
+        pbar = tqdm(desc="Building product", unit="states", disable=not verbose)
         while queue:
             ps = queue.popleft()
             explored += 1
-            
-            if explored % 10000 == 0 and verbose:
-                print(f"  Explored {explored} states, queue size: {len(queue)}")
+            pbar.update(1)
+            pbar.set_postfix(queue=len(queue), states=len(self.states))
             
             # Try all controls
             for u_idx in range(num_controls):
@@ -219,11 +243,15 @@ class ProductAutomaton:
                 
                 # Store transition
                 self.transitions[(ps, u_idx)] = product_successors
-        
+
+        pbar.close()
+
         if verbose:
             print(f"Product states: {len(self.states)}")
             print(f"Accepting states: {len(self.accepting_states)}")
             print(f"Product transitions: {len(self.transitions)}")
+            print(f"Label cache size: {len(self._cell_labels)}")
+            print(f"NFA transition cache size: {len(self._nfa_transition_cache)}")
             print("=" * 50)
     
     def get_successors(self, ps: ProductState, u_idx: int) -> Set[ProductState]:
@@ -362,51 +390,69 @@ class ProductSynthesis:
     ) -> Tuple[Set[ProductState], List[Set[ProductState]], Dict[ProductState, List[int]]]:
         """
         Compute reachability to accepting states on the Product Automaton.
+
+        OPTIMIZED: Only checks states not yet in winning set, and pre-computes
+        which states have valid transitions.
         """
         if verbose:
             print("=" * 50)
             print("PRODUCT REACHABILITY SYNTHESIS")
             print("=" * 50)
-        
+
         num_controls = len(self.abstraction.dynamics.control_set)
         target = self.product.accepting_states
-        
+
         if verbose:
             print(f"Target (accepting): {len(target)} product states")
-        
+
+        # Pre-compute states that have at least one transition (optimization)
+        states_with_transitions = {
+            ps for ps in self.product.states
+            if any(self.product.get_successors(ps, u_idx) for u_idx in range(num_controls))
+        }
+
+        if verbose:
+            print(f"States with transitions: {len(states_with_transitions)}")
+
         # Fixed-point: backward reachability
         r_k = target.copy()
         reach_sets = [r_k.copy()]
-        
+
         if verbose:
             print(f"R₀: {len(r_k)} states")
-        
+
         iteration = 0
+        pbar = tqdm(desc="Reachability", unit="iter", disable=not verbose)
         while True:
             iteration += 1
-            
+            pbar.update(1)
+
             # Pre(Rₖ): states that can reach Rₖ in one step
+            # OPTIMIZATION: Only check states not already in r_k
+            candidates = states_with_transitions - r_k
             pre_r_k = set()
-            for ps in self.product.states:
+
+            for ps in candidates:
                 for u_idx in range(num_controls):
                     successors = self.product.get_successors(ps, u_idx)
                     # Robust: ALL successors must be in r_k
                     if successors and successors.issubset(r_k):
                         pre_r_k.add(ps)
                         break
-            
-            # Rₖ₊₁ = target ∪ Pre(Rₖ)
-            r_k_plus_1 = target | pre_r_k
-            added = len(r_k_plus_1) - len(r_k)
-            
-            if verbose:
-                print(f"Iteration {iteration}: {len(r_k_plus_1)} states (+{added})")
-            
+
+            # Rₖ₊₁ = target ∪ Pre(Rₖ) ∪ r_k
+            r_k_plus_1 = r_k | pre_r_k
+            added = len(pre_r_k)
+
+            pbar.set_postfix(states=len(r_k_plus_1), added=added)
+
             reach_sets.append(r_k_plus_1.copy())
-            
-            if r_k_plus_1 == r_k:
+
+            if added == 0:
                 break
             r_k = r_k_plus_1
+
+        pbar.close()
         
         winning_set = r_k
         

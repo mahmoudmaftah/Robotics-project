@@ -1,0 +1,38 @@
+Model 1 — Integrator model (discrete)
+
+x1(t+1) = x1(t) + τ ( u1(t) + w1(t) )
+x2(t+1) = x2(t) + τ ( u2(t) + w2(t) )
+
+
+Sampling period: τ.
+
+State constraints: X = [−10,10] × [−10,10].
+
+Input constraints: U = [−1,1] × [−1,1].
+
+Disturbance set: W = [−0.05, 0.05] × [−0.05, 0.05].
+
+Model 2 — Unicycle (discrete)
+
+x1(t+1) = x1(t) + τ ( u1(t) * cos(x3(t)) + w1(t) )
+x2(t+1) = x2(t) + τ ( u1(t) * sin(x3(t)) + w2(t) )
+x3(t+1) = x3(t) + τ ( u2(t) + w3(t) )   (mod 2π)
+
+
+State constraints: X = [0,10] × [0,10] × [−π,π].
+
+Input constraints: U = [0.25,1] × [−1,1].
+
+Disturbance set: W = [−0.05,0.05]³.
+
+Model 3 — Two-link planar manipulator (discrete via Euler)
+
+x(t+1) = x(t) + τ * f(x(t), u(t))
+where x = [θ, θ̇], and
+f(x,u) = [ θ̇ ;
+           M(θ)^{-1} ( u − c(θ, θ̇) − g(θ) ) ]
+
+
+Parameters: m1=m2=1.0 kg, ℓ1=ℓ2=0.5 m, g=9.81 m/s² (numerical constants given).
+
+x ∈ R⁴ (two joint angles and velocities), u ∈ R² torques.
