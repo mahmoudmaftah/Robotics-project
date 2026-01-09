@@ -49,7 +49,7 @@ class InteractivePostVisualizer:
         ])
         
         # Dynamics and abstraction (will be created on discretize)
-        self.dynamics = UnicycleDynamics(tau=self.tau, w_bound=self.w_bound)
+        self.dynamics = UnicycleDynamics(tau=self.tau, w_bound=self.w_bound, v_values=np.linspace(0.25, 1, num=4), omega_values=np.linspace(-np.pi, np.pi, num=10))
         self.abstraction = None
         
         # Selected cell
